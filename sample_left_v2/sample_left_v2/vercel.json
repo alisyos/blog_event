@@ -1,0 +1,8 @@
+{
+  "functions": {
+    "app/api/blog-comments/route.ts": {
+      "maxDuration": 60,
+      "memory": 1024
+    }
+  }
+}
