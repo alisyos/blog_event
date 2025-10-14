@@ -1,4 +1,6 @@
 import { BlogComment } from '@/types/blog-comment';
+import * as fs from 'fs';
+import * as path from 'path';
 
 export type JobStatus = 'pending' | 'processing' | 'completed' | 'failed';
 
@@ -18,19 +20,63 @@ export interface Job {
   updatedAt: Date;
 }
 
-// 인메모리 작업 저장소 (HMR 보호)
-// Next.js 개발 모드에서 HMR이 발생해도 데이터가 유지되도록 globalThis 사용
-declare global {
-  var __jobs: Map<string, Job> | undefined;
-}
+// 파일 시스템 기반 저장소 (Vercel /tmp 디렉토리)
+const JOBS_DIR = path.join('/tmp', 'jobs');
 
-const jobs = globalThis.__jobs ?? new Map<string, Job>();
-if (process.env.NODE_ENV !== 'production') {
-  globalThis.__jobs = jobs;
+// /tmp/jobs 디렉토리 생성
+if (!fs.existsSync(JOBS_DIR)) {
+  fs.mkdirSync(JOBS_DIR, { recursive: true });
 }
 
 // 작업 자동 정리 (1시간 후)
 const JOB_CLEANUP_TIME = 60 * 60 * 1000; // 1시간
+
+/**
+ * 작업 파일 경로 가져오기
+ */
+function getJobFilePath(id: string): string {
+  return path.join(JOBS_DIR, `${id}.json`);
+}
+
+/**
+ * 작업 저장
+ */
+function saveJob(job: Job): void {
+  const filePath = getJobFilePath(job.id);
+  fs.writeFileSync(filePath, JSON.stringify(job), 'utf8');
+}
+
+/**
+ * 작업 로드
+ */
+function loadJob(id: string): Job | undefined {
+  const filePath = getJobFilePath(id);
+  if (!fs.existsSync(filePath)) {
+    return undefined;
+  }
+
+  try {
+    const data = fs.readFileSync(filePath, 'utf8');
+    const job = JSON.parse(data);
+    // Date 객체 복원
+    job.createdAt = new Date(job.createdAt);
+    job.updatedAt = new Date(job.updatedAt);
+    return job;
+  } catch (error) {
+    console.error(`작업 ${id} 로드 실패:`, error);
+    return undefined;
+  }
+}
+
+/**
+ * 작업 삭제
+ */
+function deleteJob(id: string): void {
+  const filePath = getJobFilePath(id);
+  if (fs.existsSync(filePath)) {
+    fs.unlinkSync(filePath);
+  }
+}
 
 /**
  * 새로운 작업 생성
@@ -49,11 +95,11 @@ export function createJob(blogUrl: string): Job {
     updatedAt: new Date(),
   };
 
-  jobs.set(id, job);
+  saveJob(job);
 
-  // 자동 정리 스케줄
+  // 자동 정리 스케줄 (서버리스 환경에서는 동작하지 않을 수 있음)
   setTimeout(() => {
-    jobs.delete(id);
+    deleteJob(id);
     console.log(`작업 ${id} 자동 삭제됨`);
   }, JOB_CLEANUP_TIME);
 
@@ -64,18 +110,18 @@ export function createJob(blogUrl: string): Job {
  * 작업 조회
  */
 export function getJob(id: string): Job | undefined {
-  return jobs.get(id);
+  return loadJob(id);
 }
 
 /**
  * 작업 상태 업데이트
  */
 export function updateJob(id: string, updates: Partial<Job>): Job | undefined {
-  const job = jobs.get(id);
+  const job = loadJob(id);
   if (!job) return undefined;
 
   Object.assign(job, updates, { updatedAt: new Date() });
-  jobs.set(id, job);
+  saveJob(job);
 
   return job;
 }
@@ -105,14 +151,14 @@ export function updateJobProgress(
  * 댓글 추가
  */
 export function addComments(id: string, newComments: BlogComment[]): Job | undefined {
-  const job = jobs.get(id);
+  const job = loadJob(id);
   if (!job) return undefined;
 
   job.comments.push(...newComments);
   job.collectedComments = job.comments.length;
   job.updatedAt = new Date();
 
-  jobs.set(id, job);
+  saveJob(job);
   return job;
 }
 
@@ -141,7 +187,23 @@ export function failJob(id: string, error: string): Job | undefined {
  * 모든 작업 조회 (디버깅용)
  */
 export function getAllJobs(): Job[] {
-  return Array.from(jobs.values());
+  try {
+    const files = fs.readdirSync(JOBS_DIR);
+    const jobs: Job[] = [];
+
+    for (const file of files) {
+      if (file.endsWith('.json')) {
+        const jobId = file.replace('.json', '');
+        const job = loadJob(jobId);
+        if (job) jobs.push(job);
+      }
+    }
+
+    return jobs;
+  } catch (error) {
+    console.error('모든 작업 조회 실패:', error);
+    return [];
+  }
 }
 
 /**
@@ -155,14 +217,20 @@ function generateJobId(): string {
  * 작업 정리 (최대 개수 제한)
  */
 export function cleanupOldJobs(maxJobs: number = 100): void {
-  if (jobs.size <= maxJobs) return;
+  try {
+    const allJobs = getAllJobs();
+    if (allJobs.length <= maxJobs) return;
 
-  const sortedJobs = Array.from(jobs.entries())
-    .sort((a, b) => a[1].createdAt.getTime() - b[1].createdAt.getTime());
+    const sortedJobs = allJobs.sort(
+      (a, b) => a.createdAt.getTime() - b.createdAt.getTime()
+    );
 
-  const toDelete = sortedJobs.slice(0, jobs.size - maxJobs);
-  toDelete.forEach(([id]) => {
-    jobs.delete(id);
-    console.log(`작업 ${id} 정리됨 (최대 개수 초과)`);
-  });
+    const toDelete = sortedJobs.slice(0, allJobs.length - maxJobs);
+    toDelete.forEach((job) => {
+      deleteJob(job.id);
+      console.log(`작업 ${job.id} 정리됨 (최대 개수 초과)`);
+    });
+  } catch (error) {
+    console.error('작업 정리 실패:', error);
+  }
 }

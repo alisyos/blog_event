@@ -148,3 +148,4 @@ async function processCommentsInBackground(
 }
 
 export const dynamic = 'force-dynamic';
+export const maxDuration = 60; // Vercel Pro: 최대 60초 (Free: 10초)
