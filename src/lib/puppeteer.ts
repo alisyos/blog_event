@@ -15,14 +15,11 @@ export async function getBrowser(): Promise<Browser> {
 
   if (isProduction) {
     // Vercel 프로덕션 환경
-    // @sparticuz/chromium 설정
-    chromium.setGraphicsMode = false;
-
     browserInstance = await puppeteer.launch({
       args: [...chromium.args, '--disable-gpu', '--single-process'],
-      defaultViewport: chromium.defaultViewport,
+      defaultViewport: { width: 1280, height: 720 },
       executablePath: await chromium.executablePath(),
-      headless: chromium.headless,
+      headless: true,
     });
   } else {
     // 로컬 개발 환경
