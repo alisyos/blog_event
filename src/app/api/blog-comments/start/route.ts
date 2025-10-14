@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createJob, updateJob, addComments, completeJob, failJob } from '@/lib/job-manager';
-import { scrapeNaverBlogCommentsSimple } from '@/lib/puppeteer-simple';
+import { scrapeNaverBlogCommentsSimple, ScrapeResult } from '@/lib/puppeteer-simple';
 import { convertCommentsToCSV } from '@/lib/csv-utils';
 
 /**
