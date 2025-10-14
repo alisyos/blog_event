@@ -15,10 +15,21 @@ export async function getBrowser(): Promise<Browser> {
 
   if (isProduction) {
     // Vercel 프로덕션 환경
+    const executablePath = await chromium.executablePath();
+
+    console.log('Chromium executable path:', executablePath);
+
     browserInstance = await puppeteer.launch({
-      args: [...chromium.args, '--disable-gpu', '--single-process'],
+      args: [
+        ...chromium.args,
+        '--disable-gpu',
+        '--disable-dev-shm-usage',
+        '--disable-setuid-sandbox',
+        '--no-sandbox',
+        '--single-process',
+      ],
       defaultViewport: { width: 1280, height: 720 },
-      executablePath: await chromium.executablePath(),
+      executablePath,
       headless: true,
     });
   } else {
