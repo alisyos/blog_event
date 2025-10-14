@@ -41,7 +41,7 @@ function parseBlogUrl(url: string): { blogId: string; logNo: string } | null {
 
 /**
  * POST /api/blog-comments/start
- * 백그라운드 댓글 수집 작업 시작
+ * 동기 방식 댓글 수집 (Vercel Pro 60초 타임아웃)
  */
 export async function POST(request: NextRequest) {
   try {
@@ -68,18 +68,69 @@ export async function POST(request: NextRequest) {
     const job = createJob(blogUrl);
     console.log(`새로운 작업 생성: ${job.id} - ${blogUrl}`);
 
-    // 백그라운드에서 댓글 수집 시작 (비동기)
-    processCommentsInBackground(job.id, parsed.blogId, parsed.logNo).catch((error) => {
-      console.error(`작업 ${job.id} 백그라운드 처리 오류:`, error);
-      failJob(job.id, error.message || '알 수 없는 오류가 발생했습니다');
-    });
+    try {
+      // 동기 방식으로 댓글 수집 (60초 안에 완료)
+      updateJob(job.id, { status: 'processing', progress: 5 });
 
-    // 즉시 응답 반환 (작업 ID)
-    return NextResponse.json({
-      success: true,
-      jobId: job.id,
-      message: '댓글 수집 작업이 시작되었습니다',
-    });
+      console.log(`작업 ${job.id} 처리 시작: ${parsed.blogId}/${parsed.logNo}`);
+
+      // 타임아웃 제한: 50초 (여유 시간 확보)
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('수집 시간이 초과되었습니다 (50초)')), 50000);
+      });
+
+      const scrapePromise = scrapeNaverBlogCommentsSimple(parsed.blogId, parsed.logNo, job.id);
+
+      const result = await Promise.race([scrapePromise, timeoutPromise]) as ScrapeResult;
+
+      // 수집된 댓글 추가
+      addComments(job.id, result.comments);
+
+      // 진행률 업데이트
+      updateJob(job.id, {
+        progress: 95,
+        totalComments: result.total,
+      });
+
+      console.log(`작업 ${job.id}: ${result.comments.length}개 댓글 수집 완료`);
+
+      // CSV 생성
+      const jobData = updateJob(job.id, { progress: 98 });
+      if (!jobData) {
+        throw new Error('작업을 찾을 수 없습니다');
+      }
+
+      const csvData = convertCommentsToCSV(jobData.comments);
+
+      // 작업 완료
+      completeJob(job.id, csvData);
+
+      console.log(`작업 ${job.id} 완료: ${jobData.comments.length}개 댓글 수집`);
+
+      // 완료된 작업 정보 반환
+      return NextResponse.json({
+        success: true,
+        jobId: job.id,
+        status: 'completed',
+        totalComments: jobData.comments.length,
+        message: '댓글 수집이 완료되었습니다',
+      });
+
+    } catch (error) {
+      console.error(`작업 ${job.id} 처리 실패:`, error);
+      failJob(
+        job.id,
+        error instanceof Error ? error.message : '댓글 수집 중 오류가 발생했습니다'
+      );
+
+      return NextResponse.json(
+        {
+          success: false,
+          error: error instanceof Error ? error.message : '댓글 수집 중 오류가 발생했습니다',
+        },
+        { status: 500 }
+      );
+    }
 
   } catch (error) {
     console.error('작업 시작 오류:', error);
@@ -93,59 +144,5 @@ export async function POST(request: NextRequest) {
   }
 }
 
-/**
- * 백그라운드 댓글 수집 처리
- */
-async function processCommentsInBackground(
-  jobId: string,
-  blogId: string,
-  logNo: string
-): Promise<void> {
-  try {
-    // 작업 시작
-    updateJob(jobId, { status: 'processing', progress: 5 });
-
-    console.log(`작업 ${jobId} 처리 시작: ${blogId}/${logNo}`);
-
-    // 단순 버전으로 댓글 수집 (jobId 전달하여 실시간 업데이트)
-    const result = await scrapeNaverBlogCommentsSimple(blogId, logNo, jobId);
-
-    // 수집된 모든 댓글 추가
-    addComments(jobId, result.comments);
-
-    // 진행률 업데이트
-    updateJob(jobId, {
-      progress: 95,
-      totalComments: result.total,
-    });
-
-    console.log(
-      `작업 ${jobId}: ${result.comments.length}개 댓글 수집 완료`
-    );
-
-    // 작업 완료 - CSV 생성
-    const job = updateJob(jobId, { progress: 98 });
-    if (!job) {
-      throw new Error('작업을 찾을 수 없습니다');
-    }
-
-    console.log(`작업 ${jobId}: CSV 생성 중... (총 ${job.comments.length}개 댓글)`);
-
-    const csvData = convertCommentsToCSV(job.comments);
-
-    // 작업 완료 처리
-    completeJob(jobId, csvData);
-
-    console.log(`작업 ${jobId} 완료: ${job.comments.length}개 댓글 수집`);
-
-  } catch (error) {
-    console.error(`작업 ${jobId} 처리 실패:`, error);
-    failJob(
-      jobId,
-      error instanceof Error ? error.message : '댓글 수집 중 오류가 발생했습니다'
-    );
-  }
-}
-
 export const dynamic = 'force-dynamic';
-export const maxDuration = 60; // Vercel Pro: 최대 60초 (Free: 10초)
+export const maxDuration = 60; // Vercel Pro: 최대 60초

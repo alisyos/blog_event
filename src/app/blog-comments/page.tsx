@@ -104,9 +104,18 @@ export default function BlogCommentsPage() {
     }
   }, [jobInfo?.id, jobInfo?.status]);
 
-  // 댓글 수집 시작
+  // 댓글 수집 시작 (동기 방식)
   const onSubmit = async (data: BlogUrlFormData) => {
     try {
+      // 로딩 상태 표시
+      setJobInfo({
+        id: 'temp',
+        status: 'processing',
+        progress: 0,
+        totalComments: 0,
+        collectedComments: 0,
+      });
+
       const response = await fetch('/api/blog-comments/start', {
         method: 'POST',
         headers: {
@@ -118,19 +127,34 @@ export default function BlogCommentsPage() {
       const result = await response.json();
 
       if (result.success && result.jobId) {
+        // 동기 방식이므로 즉시 완료 상태
         setJobInfo({
           id: result.jobId,
-          status: 'pending',
+          status: result.status || 'completed',
+          progress: 100,
+          totalComments: result.totalComments || 0,
+          collectedComments: result.totalComments || 0,
+        });
+      } else {
+        setJobInfo({
+          id: 'error',
+          status: 'failed',
           progress: 0,
           totalComments: 0,
           collectedComments: 0,
+          error: result.error || '작업 시작에 실패했습니다.',
         });
-      } else {
-        alert(result.error || '작업 시작에 실패했습니다.');
       }
     } catch (error) {
       console.error('작업 시작 오류:', error);
-      alert('작업 시작 중 오류가 발생했습니다.');
+      setJobInfo({
+        id: 'error',
+        status: 'failed',
+        progress: 0,
+        totalComments: 0,
+        collectedComments: 0,
+        error: '작업 시작 중 오류가 발생했습니다.',
+      });
     }
   };
 
@@ -368,8 +392,8 @@ export default function BlogCommentsPage() {
         <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
           <h3 className="font-semibold text-blue-900 mb-2">안내 사항</h3>
           <ul className="text-sm text-blue-800 space-y-1 list-disc list-inside">
-            <li>댓글 수집은 백그라운드에서 진행되며, 수집 중에도 다른 작업을 할 수 있습니다</li>
-            <li>댓글이 많은 경우 수집에 수 분이 소요될 수 있습니다</li>
+            <li>댓글 수집은 최대 50초 동안 진행됩니다</li>
+            <li>댓글이 매우 많은 경우 일부만 수집될 수 있습니다</li>
             <li>네이버 서버 부하를 방지하기 위해 적절한 대기 시간이 적용됩니다</li>
             <li>수집된 댓글은 CSV 파일로 다운로드할 수 있습니다</li>
           </ul>
