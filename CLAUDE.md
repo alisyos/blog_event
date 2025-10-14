@@ -156,37 +156,48 @@ src/
 ### 주요 기능
 
 - **블로그 URL 입력**: 네이버 블로그 포스팅 URL을 입력하여 댓글 수집 시작
-- **백그라운드 처리**: 서버 부하를 방지하기 위한 비동기 백그라운드 작업 처리
-- **실시간 진행 상황**: 2초마다 폴링하여 수집 진행률 표시
-- **CSV 다운로드**: 수집 완료 후 Excel 호환 CSV 파일 다운로드 (UTF-8 BOM)
+- **HTTP 스트리밍**: 페이지별로 실시간 데이터 전송하여 Vercel 타임아웃 우회
+- **실시간 진행 상황**: 페이지 수집 시 즉시 프론트엔드에 진행률 업데이트
+- **무제한 수집**: 타임아웃 없이 모든 페이지의 댓글 수집 가능
+- **CSV 다운로드**: 수집 완료 후 클라이언트에서 CSV 파일 생성 및 다운로드 (UTF-8 BOM)
 - **페이지네이션 지원**: 여러 페이지에 걸친 댓글 자동 수집
 
 ### 아키텍처
 
 #### 1. 프론트엔드 (src/app/blog-comments/page.tsx)
 - URL 입력 폼
-- 작업 시작 및 진행 상황 표시
-- 실시간 폴링 (2초 간격)
-- 수집된 댓글 수 및 진행률 표시
-- CSV 다운로드 버튼
+- HTTP 스트리밍 연결 (ReadableStream API)
+- 실시간 페이지별 진행 상황 표시
+- 수집된 댓글을 메모리에 누적 저장
+- 클라이언트에서 CSV 생성 및 다운로드
 
 #### 2. API 라우트
 
-**POST /api/blog-comments/start**
-- 새로운 댓글 수집 작업 생성
-- 즉시 jobId 반환
-- 백그라운드에서 크롤링 시작
+**POST /api/blog-comments/stream** (주요 엔드포인트)
+- HTTP 스트리밍 방식으로 댓글 수집
+- ReadableStream을 사용하여 페이지별 데이터 전송
+- 각 페이지 수집 시마다 즉시 프론트엔드로 전송
+- 타임아웃 없이 무제한 수집 가능
+- Content-Type: `text/event-stream`
+- 전송 형식: 줄바꿈으로 구분된 JSON 청크
+  ```json
+  {"type":"start","message":"댓글 수집을 시작합니다..."}
+  {"type":"page","page":10,"comments":[...],"totalComments":50,"progress":50}
+  {"type":"complete","total":100,"message":"총 100개의 댓글을 수집했습니다."}
+  ```
 
-**GET /api/blog-comments/status/[jobId]**
-- 작업 진행 상황 조회
-- 상태: `pending`, `processing`, `completed`, `failed`
-- 진행률 및 수집된 댓글 수 반환
-- **중요**: Next.js 14에서 `params`는 Promise일 수 있으므로 `await Promise.resolve(params)` 필요
+**POST /api/blog-comments/start** (레거시, 60초 제한)
+- 동기 방식 댓글 수집 (50초 타임아웃)
+- Vercel Pro 60초 제한으로 인해 제한적
+- 소량 댓글에만 사용 권장
 
-**GET /api/blog-comments/download/[jobId]**
-- 완료된 작업의 CSV 파일 다운로드
-- UTF-8 BOM 인코딩으로 Excel 호환
-- **중요**: Next.js 14에서 `params`는 Promise일 수 있으므로 `await Promise.resolve(params)` 필요
+**GET /api/blog-comments/status/[jobId]** (레거시)
+- `/start` 엔드포인트용 상태 조회 API
+- 스트리밍 방식에서는 사용하지 않음
+
+**GET /api/blog-comments/download/[jobId]** (레거시)
+- `/start` 엔드포인트용 다운로드 API
+- 스트리밍 방식은 클라이언트에서 직접 CSV 생성
 
 #### 3. 핵심 라이브러리
 
@@ -195,22 +206,114 @@ src/
 - Vercel 배포를 위한 @sparticuz/chromium 사용
 - 로컬 개발 환경과 프로덕션 환경 자동 감지
 
-**src/lib/puppeteer-simple.ts** (메인 크롤링 로직)
-- 네이버 블로그 댓글 수집
+**src/lib/puppeteer-streaming.ts** (스트리밍 크롤링 로직 - 주요)
+- 네이버 블로그 댓글 수집 (스트리밍 버전)
+- 페이지별 콜백 함수로 실시간 데이터 전송
 - iframe 감지 및 프레임 간 탐색
 - "댓글" 버튼 자동 클릭하여 댓글 활성화
-- 페이지네이션 지원 ("이전" 버튼 클릭)
-- 다중 페이지 순회 (최대 20페이지 제한)
+- 페이지네이션 지원 (마지막 페이지부터 역순으로 수집)
+- 다중 페이지 순회 (최대 100페이지)
+- 각 페이지 수집 후 즉시 콜백 호출
 
-**src/lib/job-manager.ts**
+**src/lib/puppeteer-simple.ts** (레거시 크롤링 로직)
+- 동기식 댓글 수집 (50초 타임아웃)
+- 모든 댓글 수집 완료 후 한 번에 반환
+- `/start` 엔드포인트에서 사용
+
+**src/lib/job-manager.ts** (레거시)
 - 인메모리 작업 큐 관리
-- 작업 생성, 업데이트, 완료, 실패 처리
-- 댓글 추가 및 진행률 추적
+- `/start` 엔드포인트에서만 사용
+- 스트리밍 방식에서는 사용하지 않음
 
-**src/lib/csv-utils.ts**
+**src/lib/csv-utils.ts** (레거시)
 - BlogComment 배열을 CSV 문자열로 변환
-- UTF-8 BOM 추가 (Excel 호환)
-- 헤더: 작성일, 닉네임, 작성자 URL, 공감수, 링크수, 답글수, 첨부 이미지 URL, 댓글 내용
+- 서버 사이드 CSV 생성용
+- 스트리밍 방식에서는 클라이언트에서 직접 CSV 생성
+
+### HTTP 스트리밍 구현 (Vercel 타임아웃 해결)
+
+#### 문제: Vercel Serverless 타임아웃
+- Vercel Pro는 최대 60초 serverless function 실행 제한
+- 댓글이 많은 블로그는 50초 안에 수집 불가능
+- 기존 동기식 방식의 한계
+
+#### 해결: HTTP Streaming (ReadableStream)
+페이지별로 데이터를 전송하여 연결을 유지하고 타임아웃을 우회
+
+**서버 사이드 (src/app/api/blog-comments/stream/route.ts)**:
+```typescript
+const stream = new ReadableStream({
+  async start(controller) {
+    const encoder = new TextEncoder();
+
+    // 페이지별 콜백 함수
+    const onPageCollected = (pageData) => {
+      const chunk = JSON.stringify({
+        type: 'page',
+        page: pageData.pageNumber,
+        comments: pageData.comments,
+        totalComments: totalComments,
+        progress: Math.round(...),
+      }) + '\n';
+
+      // 즉시 전송 (연결 유지)
+      controller.enqueue(encoder.encode(chunk));
+    };
+
+    // 스트리밍 크롤링 시작
+    await scrapeNaverBlogCommentsStreaming(blogId, logNo, onPageCollected);
+
+    // 완료 메시지
+    controller.enqueue(encoder.encode(JSON.stringify({type:'complete'})));
+    controller.close();
+  }
+});
+
+return new Response(stream, {
+  headers: {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+  }
+});
+```
+
+**클라이언트 사이드 (src/app/blog-comments/page.tsx)**:
+```typescript
+const response = await fetch('/api/blog-comments/stream', {
+  method: 'POST',
+  body: JSON.stringify({ blogUrl }),
+});
+
+const reader = response.body.getReader();
+const decoder = new TextDecoder();
+let buffer = '';
+
+while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+
+  buffer += decoder.decode(value, { stream: true });
+  const lines = buffer.split('\n');
+  buffer = lines.pop() || '';
+
+  for (const line of lines) {
+    const chunk = JSON.parse(line);
+
+    if (chunk.type === 'page') {
+      // 실시간 UI 업데이트 + 댓글 저장
+      setCollectedComments(prev => [...prev, ...chunk.comments]);
+      setJobInfo({progress: chunk.progress, ...});
+    }
+  }
+}
+```
+
+**장점**:
+- ✅ 타임아웃 없이 무제한 수집 가능
+- ✅ 실시간 진행 상황 표시
+- ✅ 추가 인프라 불필요 (DB, Redis 등)
+- ✅ 각 페이지 전송마다 연결이 유지되어 타임아웃 리셋
 
 ### 네이버 블로그 댓글 크롤링 방법
 

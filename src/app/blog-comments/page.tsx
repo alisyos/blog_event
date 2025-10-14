@@ -52,6 +52,7 @@ interface JobInfo {
 export default function BlogCommentsPage() {
   const [jobInfo, setJobInfo] = useState<JobInfo | null>(null);
   const [pollingInterval, setPollingInterval] = useState<NodeJS.Timeout | null>(null);
+  const [collectedComments, setCollectedComments] = useState<any[]>([]);
 
   const {
     register,
@@ -104,19 +105,22 @@ export default function BlogCommentsPage() {
     }
   }, [jobInfo?.id, jobInfo?.status]);
 
-  // 댓글 수집 시작 (동기 방식)
+  // 댓글 수집 시작 (스트리밍 방식)
   const onSubmit = async (data: BlogUrlFormData) => {
     try {
+      // 초기화
+      setCollectedComments([]);
+
       // 로딩 상태 표시
       setJobInfo({
-        id: 'temp',
+        id: 'streaming',
         status: 'processing',
         progress: 0,
         totalComments: 0,
         collectedComments: 0,
       });
 
-      const response = await fetch('/api/blog-comments/start', {
+      const response = await fetch('/api/blog-comments/stream', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -124,48 +128,121 @@ export default function BlogCommentsPage() {
         body: JSON.stringify({ blogUrl: data.blogUrl }),
       });
 
-      const result = await response.json();
-
-      if (result.success && result.jobId) {
-        // 동기 방식이므로 즉시 완료 상태
-        setJobInfo({
-          id: result.jobId,
-          status: result.status || 'completed',
-          progress: 100,
-          totalComments: result.totalComments || 0,
-          collectedComments: result.totalComments || 0,
-        });
-      } else {
-        setJobInfo({
-          id: 'error',
-          status: 'failed',
-          progress: 0,
-          totalComments: 0,
-          collectedComments: 0,
-          error: result.error || '작업 시작에 실패했습니다.',
-        });
+      if (!response.ok) {
+        throw new Error('서버 응답 오류');
       }
+
+      if (!response.body) {
+        throw new Error('응답 본문 없음');
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      // 스트림 읽기
+      while (true) {
+        const { done, value } = await reader.read();
+
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+
+        // 마지막 불완전한 라인은 buffer에 남김
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+
+          try {
+            const chunk = JSON.parse(line);
+
+            if (chunk.type === 'start') {
+              console.log('수집 시작:', chunk.message);
+            } else if (chunk.type === 'page') {
+              // 페이지별 업데이트 및 댓글 저장
+              setCollectedComments(prev => [...prev, ...chunk.comments]);
+              setJobInfo(prev => ({
+                id: prev?.id || 'streaming',
+                status: 'processing',
+                progress: chunk.progress,
+                totalComments: chunk.totalComments,
+                collectedComments: chunk.totalComments,
+                totalPages: chunk.totalPages,
+                currentPage: chunk.page,
+              }));
+            } else if (chunk.type === 'complete') {
+              // 완료
+              setJobInfo(prev => ({
+                id: prev?.id || 'streaming',
+                status: 'completed',
+                progress: 100,
+                totalComments: chunk.total,
+                collectedComments: chunk.total,
+              }));
+            } else if (chunk.type === 'error') {
+              // 오류
+              setJobInfo(prev => ({
+                id: prev?.id || 'error',
+                status: 'failed',
+                progress: prev?.progress || 0,
+                totalComments: prev?.totalComments || 0,
+                collectedComments: prev?.collectedComments || 0,
+                error: chunk.error,
+              }));
+            }
+          } catch (parseError) {
+            console.error('JSON 파싱 오류:', parseError, 'Line:', line);
+          }
+        }
+      }
+
     } catch (error) {
-      console.error('작업 시작 오류:', error);
+      console.error('스트리밍 수집 오류:', error);
       setJobInfo({
         id: 'error',
         status: 'failed',
         progress: 0,
         totalComments: 0,
         collectedComments: 0,
-        error: '작업 시작 중 오류가 발생했습니다.',
+        error: '댓글 수집 중 오류가 발생했습니다.',
       });
     }
   };
 
   // CSV 다운로드
   const handleDownloadCSV = () => {
-    if (!jobInfo?.id || jobInfo.status !== 'completed') {
+    if (!jobInfo || jobInfo.status !== 'completed' || collectedComments.length === 0) {
       alert('다운로드할 댓글이 없습니다.');
       return;
     }
 
-    window.location.href = `/api/blog-comments/download/${jobInfo.id}`;
+    // CSV 생성
+    const headers = ['작성일시', '댓글/답글', '닉네임', '작성자URL', '공감수', '답글수', '이미지URL', '링크수', '내용'];
+    const csvRows = [
+      headers.join(','),
+      ...collectedComments.map(comment => [
+        comment.createdAt || '',
+        comment.commentType || '',
+        comment.nickname || '',
+        comment.authorUrl || '',
+        comment.likes || 0,
+        comment.replyCount || 0,
+        comment.imageUrl || '',
+        comment.links || 0,
+        `"${(comment.content || '').replace(/"/g, '""')}"` // Escape quotes
+      ].join(','))
+    ];
+
+    const csvContent = csvRows.join('\n');
+    const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' }); // UTF-8 BOM
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `naver_blog_comments_${new Date().getTime()}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
   };
 
   // 새로운 수집 시작
@@ -174,6 +251,7 @@ export default function BlogCommentsPage() {
       clearInterval(pollingInterval);
     }
     setJobInfo(null);
+    setCollectedComments([]);
     reset();
   };
 
@@ -392,8 +470,8 @@ export default function BlogCommentsPage() {
         <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
           <h3 className="font-semibold text-blue-900 mb-2">안내 사항</h3>
           <ul className="text-sm text-blue-800 space-y-1 list-disc list-inside">
-            <li>댓글 수집은 최대 50초 동안 진행됩니다</li>
-            <li>댓글이 매우 많은 경우 일부만 수집될 수 있습니다</li>
+            <li>스트리밍 방식으로 실시간 댓글 수집이 진행됩니다</li>
+            <li>페이지별로 데이터를 전송하므로 타임아웃 없이 모든 댓글을 수집할 수 있습니다</li>
             <li>네이버 서버 부하를 방지하기 위해 적절한 대기 시간이 적용됩니다</li>
             <li>수집된 댓글은 CSV 파일로 다운로드할 수 있습니다</li>
           </ul>
