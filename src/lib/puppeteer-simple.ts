@@ -60,7 +60,7 @@ export async function scrapeNaverBlogCommentsSimple(
         const clicked = await frame.evaluate(() => {
           // 방법 1: #commentCount 또는 ._commentCount를 포함하는 부모 요소 찾기
           console.log('\n=== 댓글 버튼 검색 (ID/Class 기반) ===');
-          const commentCountElements = document.querySelectorAll('#commentCount, ._commentCount');
+          const commentCountElements = Array.from(document.querySelectorAll('#commentCount, ._commentCount'));
 
           if (commentCountElements.length > 0) {
             for (const countEl of commentCountElements) {
