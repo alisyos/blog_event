@@ -58,39 +58,152 @@ export async function scrapeNaverBlogCommentsSimple(
 
       try {
         const clicked = await frame.evaluate(() => {
-          // "댓글" 텍스트를 포함하는 모든 클릭 가능한 요소 찾기
+          // 방법 1: #commentCount 또는 ._commentCount를 포함하는 부모 요소 찾기
+          console.log('\n=== 댓글 버튼 검색 (ID/Class 기반) ===');
+          const commentCountElements = document.querySelectorAll('#commentCount, ._commentCount');
+
+          if (commentCountElements.length > 0) {
+            for (const countEl of commentCountElements) {
+              // 부모 요소들을 순회하며 클릭 가능한 요소 찾기
+              let parent = countEl.parentElement;
+              let depth = 0;
+
+              while (parent && depth < 5) {
+                const text = parent.textContent?.trim() || '';
+                console.log(`[부모 ${depth}] 태그: ${parent.tagName}, 텍스트: "${text.substring(0, 50)}"`);
+
+                // 클릭 가능한 요소인지 확인 (a, button, 또는 클릭 이벤트가 있는 요소)
+                if (parent.tagName === 'A' || parent.tagName === 'BUTTON' ||
+                    (parent as HTMLElement).onclick !== null ||
+                    parent.getAttribute('role') === 'button') {
+
+                  if ((parent as HTMLElement).offsetParent !== null) {
+                    console.log(`✓ 클릭 가능한 부모 요소 발견: ${parent.tagName}`);
+                    (parent as HTMLElement).click();
+                    return true;
+                  }
+                }
+
+                parent = parent.parentElement;
+                depth++;
+              }
+            }
+          }
+
+          // 방법 2: "댓글 숫자" 패턴 검색 (기존 방식)
+          console.log('\n=== 댓글 버튼 검색 (패턴 기반) ===');
           const allElements = Array.from(document.querySelectorAll('button, a, div, span'));
+
+          // 먼저 조건에 맞는 후보들을 필터링
+          const candidates: Array<{ element: Element; text: string; score: number }> = [];
 
           for (const el of allElements) {
             const text = el.textContent?.trim() || '';
 
-            // "댓글" 포함하지만 해시태그(#)는 제외
-            if (text.includes('댓글') && !text.includes('#') && text.length < 30) {
-              // 해시태그 링크가 아닌지 확인
-              const href = (el as HTMLAnchorElement).href || '';
-              if (href.includes('tagName=') || href.includes('tag=')) {
-                console.log(`해시태그 제외: "${text}"`);
-                continue;
-              }
+            // "댓글" 포함 체크
+            if (!text.includes('댓글')) continue;
 
-              // 클래스나 ID에 tag가 포함된 경우도 제외
-              const className = el.className || '';
-              const id = el.id || '';
-              if (className.includes('tag') || id.includes('tag')) {
-                console.log(`태그 요소 제외: "${text}"`);
-                continue;
-              }
+            // 길이 체크: 댓글 버튼은 보통 짧음 (20자로 제한)
+            if (text.length > 20) {
+              continue;
+            }
 
-              console.log(`"댓글" 버튼 발견: "${text}"`);
+            // 해시태그(#) 제외
+            if (text.includes('#')) {
+              continue;
+            }
 
-              // 클릭 가능한지 확인
-              if ((el as HTMLElement).offsetParent !== null) {
-                console.log('버튼 클릭 시도...');
-                (el as HTMLElement).click();
-                return true;
+            // "작성", "인증", "참여" 등의 키워드가 포함되면 제외 (이벤트 안내 텍스트)
+            if (text.includes('작성') || text.includes('인증') || text.includes('참여') ||
+                text.includes('★') || text.includes('비밀') || text.includes('완료')) {
+              continue;
+            }
+
+            // 동그라미 숫자 제외 (이벤트 번호)
+            if (text.includes('③') || text.includes('②') || text.includes('①') ||
+                text.includes('④') || text.includes('⑤')) {
+              continue;
+            }
+
+            // 해시태그 링크가 아닌지 확인
+            const href = (el as HTMLAnchorElement).href || '';
+            if (href.includes('tagName=') || href.includes('tag=')) {
+              continue;
+            }
+
+            // 클래스나 ID에 tag가 포함된 경우도 제외
+            const className = el.className || '';
+            const id = el.id || '';
+            if (className.includes('tag') || id.includes('tag')) {
+              continue;
+            }
+
+            // 클릭 가능한지 확인
+            if ((el as HTMLElement).offsetParent === null) {
+              continue;
+            }
+
+            // 이 시점에서 후보로 추가
+            // 점수 매기기: 더 정확한 패턴에 높은 점수
+            let score = 0;
+
+            // 정확히 "댓글"만 있으면 가장 높은 점수
+            if (text === '댓글') {
+              score += 100;
+            }
+
+            // "댓글 숫자" 패턴이면 높은 점수
+            if (/^댓글\s*\d+$/.test(text)) {
+              score += 90;
+            }
+
+            // _commentCount 클래스가 자식에 있으면 매우 높은 점수
+            if (el.querySelector('#commentCount, ._commentCount')) {
+              score += 150;
+            }
+
+            // button 또는 a 태그면 가산점
+            if (el.tagName === 'BUTTON' || el.tagName === 'A') {
+              score += 30;
+            }
+
+            // 클래스에 comment 관련 키워드가 있으면 가산점
+            if (className.includes('comment') || className.includes('cbox')) {
+              score += 20;
+            }
+
+            // "공감" 버튼 근처에 있는지 확인 (같은 부모 아래)
+            const parent = el.parentElement;
+            if (parent) {
+              const siblings = Array.from(parent.querySelectorAll('*'));
+              const hasLikeButton = siblings.some(sibling => {
+                const siblingText = sibling.textContent?.trim() || '';
+                return siblingText.includes('공감');
+              });
+              if (hasLikeButton) {
+                score += 50; // 공감 버튼과 같은 레벨이면 큰 가산점
               }
             }
+
+            console.log(`[후보] "${text}" (점수: ${score}, 태그: ${el.tagName})`);
+            candidates.push({ element: el, text, score });
           }
+
+          console.log(`\n총 ${candidates.length}개 후보 발견`);
+
+          // 점수가 높은 순으로 정렬
+          candidates.sort((a, b) => b.score - a.score);
+
+          // 가장 점수가 높은 것을 클릭
+          if (candidates.length > 0) {
+            const best = candidates[0];
+            console.log(`\n[최종 선택] "${best.text}" (점수: ${best.score})`);
+            console.log('버튼 클릭 시도...');
+            (best.element as HTMLElement).click();
+            return true;
+          }
+
+          console.log('\n적합한 댓글 버튼을 찾지 못했습니다.');
           return false;
         });
 
