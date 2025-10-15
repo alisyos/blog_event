@@ -231,7 +231,7 @@ export default function BlogCommentsPage() {
         comment.replyCount || 0,
         comment.imageUrl || '',
         comment.links || 0,
-        `"${(comment.content || '').replace(/"/g, '""')}"` // Escape quotes
+        `"${(comment.content || '').replace(/"/g, '""').replace(/\r?\n/g, ' ')}"` // Escape quotes and remove newlines
       ].join(','))
     ];
 
