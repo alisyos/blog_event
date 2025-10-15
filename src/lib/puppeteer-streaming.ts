@@ -192,7 +192,7 @@ export async function scrapeNaverBlogCommentsStreaming(
 
         await new Promise(resolve => setTimeout(resolve, 800));
 
-        // 댓글 수집 (기존 로직)
+        // 댓글 수집 (개선된 로직)
         const comments = await commentFrame.evaluate(() => {
           const results: any[] = [];
           const commentContainers = ['#cbox_module', '.u_cbox', 'div[id*="comment"]'];
@@ -208,30 +208,39 @@ export async function scrapeNaverBlogCommentsStreaming(
 
           if (!commentArea) commentArea = document.body;
 
-          const commentSelectors = ['.u_cbox_comment_box', '.u_cbox_list > li'];
-          let commentElements: NodeListOf<Element> | null = null;
+          // 댓글 리스트 컨테이너 찾기
+          const listContainers = ['.u_cbox_list', '.u_cbox_comment_list'];
+          let listContainer: Element | null = null;
 
-          for (const sel of commentSelectors) {
-            const elements = commentArea.querySelectorAll(sel);
-            if (elements.length > 0) {
-              commentElements = elements;
+          for (const sel of listContainers) {
+            const el = commentArea.querySelector(sel);
+            if (el) {
+              listContainer = el;
+              console.log(`[DEBUG] 댓글 리스트 컨테이너 발견: ${sel}`);
               break;
             }
           }
 
-          if (!commentElements || commentElements.length === 0) return results;
+          if (!listContainer) listContainer = commentArea;
 
-          commentElements.forEach((element) => {
+          // 댓글 박스 요소 찾기 (모든 .u_cbox_comment_box)
+          const allCommentBoxes = Array.from(listContainer.querySelectorAll('.u_cbox_comment_box'));
+          console.log(`[DEBUG] 발견된 전체 댓글 박스: ${allCommentBoxes.length}개`);
+
+          allCommentBoxes.forEach((element, index) => {
             try {
               const text = element.textContent?.trim() || '';
               if (text.length < 5) return;
 
+              // u_cbox_reply_area 내부에 있는지 확인하여 댓글/답글 구분
               let commentType = '댓글';
-              const isReply = element.classList.contains('u_cbox_reply') ||
-                             element.closest('.u_cbox_reply') !== null ||
-                             element.classList.contains('u_cbox_comment_box_reply');
 
-              if (isReply) commentType = '답글';
+              const isInReplyArea = element.closest('.u_cbox_reply_area') !== null;
+              if (isInReplyArea) {
+                commentType = '답글';
+              }
+
+              console.log(`[DEBUG] 요소 ${index}: ${commentType} - isInReplyArea: ${isInReplyArea}`);
 
               let nickname = '익명';
               let authorUrl = '';
@@ -289,42 +298,80 @@ export async function scrapeNaverBlogCommentsStreaming(
 
               content = content.replace(/신고\s*답글|답글\s*신고|신고|답글/g, '').trim();
 
+              // 이미지 URL 수집 (u_cbox_image_wrap 내부 이미지)
               let imageUrl = '';
-              const imageEl = element.querySelector('.u_cbox_contents img, .comment_text img');
-              if (imageEl) {
-                imageUrl = imageEl.getAttribute('src') || '';
-                if (imageUrl && !imageUrl.startsWith('http')) {
-                  imageUrl = `https:${imageUrl}`;
+
+              // u_cbox_image_wrap 내부의 이미지 찾기
+              const imageWrap = element.querySelector('.u_cbox_image_wrap');
+              if (imageWrap) {
+                const imageEl = imageWrap.querySelector('img');
+                if (imageEl) {
+                  const src = imageEl.getAttribute('src') || imageEl.getAttribute('data-src') || '';
+                  if (src) {
+                    imageUrl = src;
+                    if (imageUrl && !imageUrl.startsWith('http')) {
+                      imageUrl = imageUrl.startsWith('//') ? `https:${imageUrl}` : `https:${imageUrl}`;
+                    }
+                    console.log(`[DEBUG] 댓글 이미지 발견: ${imageUrl}`);
+                  }
                 }
               }
 
+              // 링크수 계산 (댓글 내용 영역의 <a> 태그 개수)
+              let linkCount = 0;
+              if (contentTextArea) {
+                const links = contentTextArea.querySelectorAll('a');
+                linkCount = links.length;
+                if (linkCount > 0) {
+                  console.log(`[DEBUG] 댓글 내 링크 ${linkCount}개 발견`);
+                }
+              }
+
+              // 답글수는 나중에 계산 (답글만 개수 센다)
               results.push({
                 createdAt,
                 commentType,
                 nickname,
                 authorUrl,
                 likes,
-                replyCount: 0,
+                replyCount: 0, // 나중에 계산
                 imageUrl,
-                links: 0,
+                links: linkCount,
                 content,
               });
             } catch (e) {
-              console.error('댓글 파싱 오류:', e);
+              console.error('[DEBUG] 댓글 파싱 오류:', e);
             }
           });
 
+          console.log(`[DEBUG] 파싱 완료: ${results.length}개 댓글`);
           return results;
         });
 
         console.log(`페이지 ${currentPageNumber}: ${comments.length}개 댓글 수집`);
         allComments.push(...comments);
 
-        // 페이지별 콜백 호출
+        // 현재까지 수집된 전체 댓글에 대해 답글수 계산
+        for (let i = 0; i < allComments.length; i++) {
+          const comment = allComments[i];
+          if (comment.commentType === '댓글') {
+            let replyCount = 0;
+            for (let j = i + 1; j < allComments.length; j++) {
+              if (allComments[j].commentType === '답글') {
+                replyCount++;
+              } else {
+                break;
+              }
+            }
+            comment.replyCount = replyCount;
+          }
+        }
+
+        // 페이지별 콜백 호출 (답글수가 계산된 현재 페이지 댓글 전송)
         const isLastPage = currentPageNumber === 1 || pageCount >= maxPages;
         onPageCollected({
           pageNumber: currentPageNumber,
-          comments,
+          comments, // 이미 allComments에 포함되어 답글수가 계산됨
           totalPages: lastPageNumber,
           isLastPage,
         });
@@ -407,21 +454,29 @@ export async function scrapeNaverBlogCommentsStreaming(
 
     console.log(`\n=== 전체 수집 완료: 총 ${allComments.length}개 댓글 ===`);
 
-    // 답글수 계산
+    // 답글수 계산 (댓글 바로 다음에 연속으로 나오는 답글 개수)
     for (let i = 0; i < allComments.length; i++) {
       const comment = allComments[i];
       if (comment.commentType === '댓글') {
+        // 이 댓글 바로 다음부터 연속된 답글 개수 세기
         let replyCount = 0;
         for (let j = i + 1; j < allComments.length; j++) {
           if (allComments[j].commentType === '답글') {
             replyCount++;
           } else {
+            // 답글이 아닌 것(다음 댓글)을 만나면 중단
             break;
           }
         }
         comment.replyCount = replyCount;
+        console.log(`[DEBUG] 댓글 "${comment.nickname}"의 답글수: ${replyCount}개`);
       }
     }
+
+    // 디버그: 댓글/답글 통계 출력
+    const commentCount = allComments.filter(c => c.commentType === '댓글').length;
+    const replyCount = allComments.filter(c => c.commentType === '답글').length;
+    console.log(`댓글: ${commentCount}개, 답글: ${replyCount}개`);
 
     return {
       comments: allComments,
